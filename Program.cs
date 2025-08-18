@@ -2,223 +2,279 @@ using System;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
-using ModelContextProtocol.Server;
-using ModelContextProtocol.Types;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace UnityMcpServer
 {
+    // Define a concrete class for tool information
+    public class ToolInfo
+    {
+        [JsonProperty("name")]
+        public string Name { get; set; }
+
+        [JsonProperty("description")]
+        public string Description { get; set; }
+
+        [JsonProperty("inputSchema")]
+        public object InputSchema { get; set; }
+    }
+
     class Program
     {
         static async Task Main(string[] args)
         {
-            var server = new McpServer(new ServerInfo
-            {
-                Name = "unity-mcp-server",
-                Version = "1.1.0" 
-            });
-
-            server.SetCapabilities(new ServerCapabilities
-            {
-                Tools = new ToolsCapability()
-            });
-
-            // 注册 Lua 脚本创建工具
-            server.AddTool(new Tool
-            {
-                Name = "create_lua_script",
-                Description = "创建Unity Lua脚本",
-                InputSchema = new
-                {
-                    type = "object",
-                    properties = new
-                    {
-                        scriptName = new { type = "string", description = "脚本名称 (不含.lua后缀)" }
-                    },
-                    required = new[] { "scriptName" }
-                }
-            }, CreateLuaScriptHandler);
+            Console.InputEncoding = Encoding.UTF8;
+            Console.OutputEncoding = Encoding.UTF8;
             
-            // 注册活动奖励补领工具
-            server.AddTool(new Tool
+            var server = new SimpleMcpServer();
+            await server.Start();
+        }
+    }
+    
+    public class SimpleMcpServer
+    {
+        public async Task Start()
+        {
+            string line;
+            while ((line = await Console.In.ReadLineAsync()) != null)
             {
-                Name = "add_activity_retro_claim",
-                Description = "在Lua脚本中添加活动奖励补领功能",
-                InputSchema = new
+                try
                 {
-                    type = "object",
-                    properties = new
+                    var request = JObject.Parse(line);
+                    await HandleRequest(request);
+                }
+                catch (Exception ex)
+                {
+                    await SendError($"解析请求失败: {ex.Message}");
+                }
+            }
+        }
+        
+        private async Task HandleRequest(JObject request)
+        {
+            string method = request["method"]?.ToString();
+            var id = request["id"];
+            
+            switch (method)
+            {
+                case "initialize":
+                    await SendResponse(new
                     {
-                        luaScriptPath = new { type = "string", description = "相对于Unity项目Assets目录的Lua脚本路径 (例如: Resources/Lua/activity.lua)" },
-                        activityKey = new { type = "string", description = "活动的唯一标识Key" }
-                    },
-                    required = new[] { "luaScriptPath", "activityKey" }
-                }
-            }, AddActivityRetroClaimHandler);
-
-            var transport = new StdioServerTransport();
-            await server.StartAsync(transport);
-            Console.Error.WriteLine("Unity MCP Server 已启动 (版本 1.1.0)");
-            await Task.Delay(Timeout.Infinite);
+                        jsonrpc = "2.0",
+                        id = id,
+                        result = new
+                        {
+                            protocolVersion = "2024-11-05",
+                            capabilities = new { tools = new { } },
+                            serverInfo = new
+                            {
+                                name = "unity-mcp-server-lua",
+                                version = "2.2.0" // Final version
+                            }
+                        }
+                    });
+                    break;
+                    
+                case "tools/list":
+                    await SendResponse(new
+                    {
+                        jsonrpc = "2.0",
+                        id = id,
+                        result = new
+                        {
+                            // Use the concrete ToolInfo class here
+                            tools = new ToolInfo[]
+                            {
+                                new ToolInfo
+                                {
+                                    Name = "create_lua_script",
+                                    Description = "创建Unity Lua脚本",
+                                    InputSchema = new
+                                    {
+                                        type = "object",
+                                        properties = new
+                                        {
+                                            scriptName = new
+                                            {
+                                                type = "string",
+                                                description = "脚本名称 (不含.lua后缀)"
+                                            }
+                                        },
+                                        required = new[] { "scriptName" }
+                                    }
+                                },
+                                new ToolInfo
+                                {
+                                    Name = "add_activity_retro_claim",
+                                    Description = "在Lua脚本中添加活动奖励补领功能",
+                                    InputSchema = new
+                                    {
+                                        type = "object",
+                                        properties = new
+                                        {
+                                            luaScriptPath = new
+                                            {
+                                                type = "string",
+                                                description = "Lua脚本路径"
+                                            },
+                                            activityKey = new
+                                            {
+                                                type = "string",
+                                                description = "活动Key"
+                                            }
+                                        },
+                                        required = new[] { "luaScriptPath", "activityKey" }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    break;
+                    
+                case "tools/call":
+                    await HandleToolCall(request, id);
+                    break;
+            }
         }
-
-
-        private static async Task<ToolResult> CreateLuaScriptHandler(ToolCall call)
+        
+        private async Task HandleToolCall(JObject request, JToken id)
         {
+            var toolName = request["params"]?["name"]?.ToString();
+            var arguments = request["params"]?["arguments"] as JObject;
+            
             try
             {
-                var args = call.Arguments;
-                string scriptName = args["scriptName"]?.ToString();
-
-                string projectPath = GetUnityProjectPath();
-                // Lua脚本通常放在Resources目录下以便Unity打包
-                string scriptsPath = Path.Combine(projectPath, "Assets", "Resources", "Lua");
-                Directory.CreateDirectory(scriptsPath);
-
-                string filePath = Path.Combine(scriptsPath, $"{scriptName}.lua");
-                await File.WriteAllTextAsync(filePath, $"-- {scriptName}.lua");
-
-                return new ToolResult { Content = new[] { new TextContent { Text = $"成功创建Lua脚本: {filePath}" } } };
+                object result = toolName switch
+                {
+                    "create_lua_script" => await CreateLuaScript(arguments),
+                    "add_activity_retro_claim" => await AddActivityRetroClaim(arguments),
+                    _ => throw new Exception($"未知工具: {toolName}")
+                };
+                
+                await SendResponse(new
+                {
+                    jsonrpc = "2.0",
+                    id = id,
+                    result = result
+                });
             }
             catch (Exception ex)
             {
-                return new ToolResult { IsError = true, Error = new ToolError { Message = $"创建Lua脚本失败: {ex.Message}" } };
+                await SendError($"工具调用失败: {ex.Message}", id);
             }
         }
-
-        private static async Task<ToolResult> AddActivityRetroClaimHandler(ToolCall call)
+        
+        private async Task<object> CreateLuaScript(JObject args)
         {
-            const string anchor = "---@Activity Retro Claim Anchor";
-            try
+            string scriptName = args?["scriptName"]?.ToString();
+            if (string.IsNullOrEmpty(scriptName))
             {
-                var args = call.Arguments;
-                string luaScriptPath = args["luaScriptPath"]?.ToString();
-                string activityKey = args["activityKey"]?.ToString();
+                throw new ArgumentNullException("scriptName", "脚本名称不能为空");
+            }
 
-                string projectPath = GetUnityProjectPath();
-                string fullPath = Path.Combine(projectPath, "Assets", luaScriptPath);
+            string projectPath = GetUnityProjectPath();
+            string scriptsPath = Path.Combine(projectPath, "Assets", "Resources", "Lua");
+            Directory.CreateDirectory(scriptsPath);
 
-                if (!File.Exists(fullPath))
+            string filePath = Path.Combine(scriptsPath, $"{scriptName}.lua");
+            await File.WriteAllTextAsync(filePath, $"-- {scriptName}.lua\n\n---@Activity Retro Claim Anchor\n");
+
+            return new
+            {
+                content = new[]
                 {
-                    throw new FileNotFoundException($"指定的Lua脚本不存在: {fullPath}");
+                    new { type = "text", text = $"成功创建Lua脚本: {filePath}" }
                 }
-
-                string content = await File.ReadAllTextAsync(fullPath);
-
-                if (!content.Contains(anchor))
-                {
-                    throw new InvalidOperationException($"脚本中未找到用于添加代码的锚点: '{anchor}'");
-                }
-
-                string template = GetRetroClaimTemplate(activityKey);
-                string newContent = content.Replace(anchor, $"{anchor}{template}");
-
-                await File.WriteAllTextAsync(fullPath, newContent);
-
-                return new ToolResult { Content = new[] { new TextContent { Text = $"成功为活动 '{activityKey}' 添加奖励补领功能到: {luaScriptPath}" } } };
-            }
-            catch (Exception ex)
-            {
-                return new ToolResult { IsError = true, Error = new ToolError { Message = $"添加功能失败: {ex.Message}" } };
-            }
-        }
-
-        // --- Helper Methods ---
-
-        private static string GetUnityProjectPath()
-        {
-            return Environment.GetEnvironmentVariable("UNITY_PROJECT_PATH")
-                ?? throw new InvalidOperationException("错误: UNITY_PROJECT_PATH 环境变量未设置。请设置该变量为您的Unity项目根目录。");
-        }
-
-        private static string GenerateCSharpScriptContent(string scriptName, string scriptType, string namespaceName)
-        {
-            return scriptType switch
-            {
-                "MonoBehaviour" => GenerateMonoBehaviour(scriptName, namespaceName),
-                "ScriptableObject" => GenerateScriptableObject(scriptName, namespaceName),
-                "Editor" => GenerateEditorScript(scriptName, namespaceName),
-                _ => throw new ArgumentException($"不支持的脚本类型: {scriptType}")
             };
         }
         
-        private static string GetRetroClaimTemplate(string activityKey)
+        private async Task<object> AddActivityRetroClaim(JObject args)
         {
-            return new StringBuilder()
-                .AppendLine($"-- Auto-generated by MCP for activity: {activityKey}")
-                .AppendLine($"function ActivityRetroClaim_{activityKey}(player)")
-                .AppendLine($"    -- 检查活动是否已结束且玩家有资格补领")
-                .AppendLine($"    local canClaim = CheckActivityStatus("{activityKey}", player)")
-                .AppendLine($"    if not canClaim then")
-                .AppendLine($"        return false, "不满足补领条件"")
-                .AppendLine($"    end")
-                .AppendLine()
-                .AppendLine($"    -- 发放奖励")
-                .AppendLine($"    local rewards = GetActivityRewards("{activityKey}")")
-                .AppendLine($"    GiveRewardsToPlayer(player, rewards)")
-                .AppendLine()
-                .AppendLine($"    -- 记录补领日志")
-                .AppendLine($"    LogRetroClaim(player, "{activityKey}")")
-                .AppendLine()
-                .AppendLine($"    return true, "奖励补领成功"")
-                .AppendLine($"end")
-                .ToString();
-        }
+            const string anchor = "---@Activity Retro Claim Anchor";
+            string luaScriptPath = args?["luaScriptPath"]?.ToString();
+            string activityKey = args?["activityKey"]?.ToString();
 
-        private static string GenerateMonoBehaviour(string name, string ns)
-        {
-            var sb = new StringBuilder();
-            sb.AppendLine("using UnityEngine;")
-              .AppendLine();
+            if (string.IsNullOrEmpty(luaScriptPath)) throw new ArgumentNullException("luaScriptPath");
+            if (string.IsNullOrEmpty(activityKey)) throw new ArgumentNullException("activityKey");
 
-            bool hasNamespace = !string.IsNullOrEmpty(ns);
-            if (hasNamespace) sb.AppendLine($"namespace {ns}{{");
+            string projectPath = GetUnityProjectPath();
+            string fullPath = Path.Combine(projectPath, "Assets", luaScriptPath);
 
-            string indent = hasNamespace ? "    " : "";
-            sb.AppendLine($"{indent}public class {name} : MonoBehaviour")
-              .AppendLine($"{indent}{{")
-              .AppendLine($"{indent}    void Start()")
-              .AppendLine($"{indent}    {{")
-              .AppendLine($"{indent}        ")
-              .AppendLine($"{indent}    }}")
-              .AppendLine()
-              .AppendLine($"{indent}    void Update()")
-              .AppendLine($"{indent}    {{")
-              .AppendLine($"{indent}        ")
-              .AppendLine($"{indent}    }}")
-              .AppendLine($"{indent}}}");
+            if (!File.Exists(fullPath))
+            {
+                throw new FileNotFoundException("指定的Lua脚本不存在: " + fullPath);
+            }
 
-            if (hasNamespace) sb.AppendLine("}");
-            return sb.ToString();
-        }
+            string content = await File.ReadAllTextAsync(fullPath);
 
-        private static string GenerateScriptableObject(string name, string ns)
-        {
-            // This can also be refactored similarly if more logic is added.
-            return $@"using UnityEngine;
+            if (!content.Contains(anchor))
+            {
+                throw new InvalidOperationException("脚本中未找到用于添加代码的锚点: '" + anchor + "'");
+            }
 
-[CreateAssetMenu(fileName = ""{name}"", menuName = ""ScriptableObjects/{name}"")]
-public class {name} : ScriptableObject
-{{
-    
-}}";
+            string template = GetRetroClaimTemplate(activityKey);
+            string newContent = content.Replace(anchor, template + "\n" + anchor);
+
+            await File.WriteAllTextAsync(fullPath, newContent);
+            
+            return new
+            {
+                content = new[]
+                {
+                    new { type = "text", text = $"成功为活动 '{activityKey}' 添加奖励补领功能到: {luaScriptPath}" }
+                }
+            };
         }
         
-        private static string GenerateEditorScript(string name, string ns)
+        private string GetUnityProjectPath()
         {
-            // Basic Editor script template
-            return $@"using UnityEditor;
-using UnityEngine;
+            return Environment.GetEnvironmentVariable("UNITY_PROJECT_PATH")
+                ?? throw new InvalidOperationException("UNITY_PROJECT_PATH 未设置");
+        }
 
-[CustomEditor(typeof(MonoBehaviour))] // Change MonoBehaviour to the type you want to inspect
-public class {name} : Editor
-{{
-    public override void OnInspectorGUI()
-    {{
-        base.OnInspectorGUI();
-
-        // Add custom editor logic here
-    }}
-}}";
+        private string GetRetroClaimTemplate(string activityKey)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("-- Auto-generated by MCP for activity: " + activityKey);
+            sb.AppendLine("function ActivityRetroClaim_" + activityKey + "(player)");
+            sb.AppendLine("    -- 检查活动是否已结束且玩家有资格补领");
+            sb.AppendLine("    local canClaim = CheckActivityStatus(\"" + activityKey + "\", player)");
+            sb.AppendLine("    if not canClaim then");
+            sb.AppendLine("        return false, \"不满足补领条件\"");
+            sb.AppendLine("    end");
+            sb.AppendLine();
+            sb.AppendLine("    -- 发放奖励");
+            sb.AppendLine("    local rewards = GetActivityRewards(\"" + activityKey + "\")");
+            sb.AppendLine("    GiveRewardsToPlayer(player, rewards)");
+            sb.AppendLine();
+            sb.AppendLine("    -- 记录补领日志");
+            sb.AppendLine("    LogRetroClaim(player, \"" + activityKey + "\")");
+            sb.AppendLine();
+            sb.AppendLine("    return true, \"奖励补领成功\"");
+            sb.AppendLine("end");
+            return sb.ToString();
+        }
+        
+        private async Task SendResponse(object response)
+        {
+            string json = JsonConvert.SerializeObject(response, Formatting.None, new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+            await Console.Out.WriteLineAsync(json);
+            await Console.Out.FlushAsync();
+        }
+        
+        private async Task SendError(string message, JToken id = null)
+        {
+            await SendResponse(new
+            {
+                jsonrpc = "2.0",
+                id = id,
+                error = new
+                {
+                    code = -32603,
+                    message = message
+                }
+            });
         }
     }
 }
