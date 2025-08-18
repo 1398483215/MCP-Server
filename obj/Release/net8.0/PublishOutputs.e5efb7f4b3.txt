@@ -1,0 +1,6 @@
+E:\MCP\activeMcpServer\bin\Release\net8.0\publish\activeMcpServer.exe
+E:\MCP\activeMcpServer\bin\Release\net8.0\publish\activeMcpServer.dll
+E:\MCP\activeMcpServer\bin\Release\net8.0\publish\activeMcpServer.deps.json
+E:\MCP\activeMcpServer\bin\Release\net8.0\publish\activeMcpServer.runtimeconfig.json
+E:\MCP\activeMcpServer\bin\Release\net8.0\publish\activeMcpServer.pdb
+E:\MCP\activeMcpServer\bin\Release\net8.0\publish\Newtonsoft.Json.dll

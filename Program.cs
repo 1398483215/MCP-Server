@@ -107,24 +107,29 @@ namespace UnityMcpServer
                                 new ToolInfo
                                 {
                                     Name = "add_activity_retro_claim",
-                                    Description = "在Lua脚本中添加活动奖励补领功能",
+                                    Description = "在配置文件中添加一个通用的活动奖励补领功能",
                                     InputSchema = new
                                     {
                                         type = "object",
                                         properties = new
                                         {
-                                            luaScriptPath = new
-                                            {
-                                                type = "string",
-                                                description = "Lua脚本路径"
-                                            },
                                             activityKey = new
                                             {
                                                 type = "string",
-                                                description = "活动Key"
+                                                description = "活动Key (例如：MyNewActivity)"
+                                            },
+                                            rewardType = new
+                                            {
+                                                type = "string",
+                                                description = "奖励类型 (例如：MyNewActivityRewardType)"
+                                            },
+                                            multipleLanguageKey = new
+                                            {
+                                                type = "string",
+                                                description = "多语言Key (例如：MyNewActivity)"
                                             }
                                         },
-                                        required = new[] { "luaScriptPath", "activityKey" }
+                                        required = new[] { "activityKey", "rewardType", "multipleLanguageKey" }
                                     }
                                 }
                             }
@@ -191,71 +196,110 @@ namespace UnityMcpServer
         
         private async Task<object> AddActivityRetroClaim(JObject args)
         {
-            const string anchor = "---@Activity Retro Claim Anchor";
-            string luaScriptPath = args?["luaScriptPath"]?.ToString();
             string activityKey = args?["activityKey"]?.ToString();
+            string rewardType = args?["rewardType"]?.ToString();
+            string multipleLanguageKey = args?["multipleLanguageKey"]?.ToString();
 
-            if (string.IsNullOrEmpty(luaScriptPath)) throw new ArgumentNullException("luaScriptPath");
-            if (string.IsNullOrEmpty(activityKey)) throw new ArgumentNullException("activityKey");
-
-            string projectPath = GetUnityProjectPath();
-            string fullPath = Path.Combine(projectPath, "Assets", luaScriptPath);
-
-            if (!File.Exists(fullPath))
+            if (string.IsNullOrEmpty(activityKey) || string.IsNullOrEmpty(rewardType) || string.IsNullOrEmpty(multipleLanguageKey))
             {
-                throw new FileNotFoundException("指定的Lua脚本不存在: " + fullPath);
+                throw new ArgumentException("Missing required arguments for AddActivityRetroClaim.");
             }
 
-            string content = await File.ReadAllTextAsync(fullPath);
+            string unityProjectPath = GetUnityProjectPath();
+            string popupSeqConfigPath = Path.Combine(unityProjectPath, "Assets", "HotAssets", "LuaScript", "Config", "PopupSeqConfig.lua");
+            string popupFunConfigPath = Path.Combine(unityProjectPath, "Assets", "HotAssets", "LuaScript", "Config", "PopupFunConfig.lua");
 
-            if (!content.Contains(anchor))
+            // 1. Modify PopupSeqConfig.lua
+            string seqConfigContent = await File.ReadAllTextAsync(popupSeqConfigPath);
+            string newSeqEntry = GetPopupSeqConfigEntry(activityKey);
+            string seqAnchor = "        --淘汰赛补领";
+            if (!seqConfigContent.Contains(seqAnchor))
             {
-                throw new InvalidOperationException("脚本中未找到用于添加代码的锚点: '" + anchor + "'");
+                throw new InvalidOperationException($"在 {popupSeqConfigPath} 中未找到锚点: '{seqAnchor}'");
             }
+            string updatedSeqConfigContent = seqConfigContent.Replace(seqAnchor, newSeqEntry + "\n" + seqAnchor);
+            await File.WriteAllTextAsync(popupSeqConfigPath, updatedSeqConfigContent);
 
-            string template = GetRetroClaimTemplate(activityKey);
-            string newContent = content.Replace(anchor, template + "\n" + anchor);
+            // 2. Modify PopupFunConfig.lua
+            string funConfigContent = await File.ReadAllTextAsync(popupFunConfigPath);
+            string newFunEntries = GetPopupFunConfigEntries(activityKey, rewardType, multipleLanguageKey);
+            string funAnchor = "-- 淘汰赛补领弹窗";
+            if (!funConfigContent.Contains(funAnchor))
+            {
+                throw new InvalidOperationException($"在 {popupFunConfigPath} 中未找到锚点: '{funAnchor}'");
+            }
+            string updatedFunConfigContent = funConfigContent.Replace(funAnchor, newFunEntries + "\n" + funAnchor);
+            await File.WriteAllTextAsync(popupFunConfigPath, updatedFunConfigContent);
 
-            await File.WriteAllTextAsync(fullPath, newContent);
-            
             return new
             {
                 content = new[]
                 {
-                    new { type = "text", text = $"成功为活动 '{activityKey}' 添加奖励补领功能到: {luaScriptPath}" }
+                    new { type = "text", text = $"成功为活动 '{activityKey}' 添加通用奖励补领功能。" }
                 }
             };
+        }
+
+        private string GetPopupSeqConfigEntry(string activityKey)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("    {");
+            sb.AppendLine($"        --{activityKey}补领");
+            sb.AppendLine($"        [\"key\"] = \"{activityKey}CompensationView\",");
+            sb.AppendLine("        [\"daily\"] = false,");
+            sb.AppendLine("        [\"downloadKey\"] = DlcNames.Base.PopTipView,");
+            sb.AppendLine($"        [\"func\"] = PopupFunConfig.CheckPushNotReceiving{activityKey}RewardView,");
+            sb.AppendLine($"        [\"currentNeed\"] = PopupFunConfig.need{activityKey}Reward,");
+            sb.AppendLine("    },");
+            return sb.ToString();
+        }
+
+        private string GetPopupFunConfigEntries(string activityKey, string rewardType, string multipleLanguageKey)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"-- {activityKey}补领弹窗");
+            sb.AppendLine($"function PopupFunConfig.CheckPushNotReceiving{activityKey}RewardView(queueName)");
+            sb.AppendLine($"    PopupFunConfig.CheckPushCommonNotReceivingRewardView(\"{activityKey}CompensationView\", \"{rewardType}\", \"{multipleLanguageKey}\", queueName)");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine($"function PopupFunConfig.need{activityKey}Reward()");
+            sb.AppendLine($"    return PopupFunConfig.NeedNotReceivingReward(\"{rewardType}\")");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            return sb.ToString();
         }
         
         private string GetUnityProjectPath()
         {
-            return Environment.GetEnvironmentVariable("UNITY_PROJECT_PATH")
-                ?? throw new InvalidOperationException("UNITY_PROJECT_PATH 未设置");
+            // 首先尝试从环境变量获取Unity项目路径
+            string envPath = Environment.GetEnvironmentVariable("UNITY_PROJECT_PATH");
+            if (!string.IsNullOrEmpty(envPath) && Directory.Exists(envPath))
+            {
+                string assetsPath = Path.Combine(envPath, "Assets");
+                if (Directory.Exists(assetsPath))
+                {
+                    return envPath;
+                }
+            }
+    
+            // 如果环境变量不可用，则回退到原来的搜索方法
+            string currentDir = Directory.GetCurrentDirectory();
+            DirectoryInfo dir = new DirectoryInfo(currentDir);
+            // Search up the directory tree to find the project root (which contains the Assets folder)
+            while (dir != null && !Directory.Exists(Path.Combine(dir.FullName, "Assets")))
+            {
+                dir = dir.Parent;
+            }
+    
+            if (dir == null)
+            {
+                // If we can't find it, we'll have to throw an exception because we can't proceed.
+                throw new DirectoryNotFoundException($"Could not find the Unity project root. Environment variable UNITY_PROJECT_PATH: '{envPath}', Current directory: '{currentDir}'");
+            }
+    
+            return dir.FullName;
         }
 
-        private string GetRetroClaimTemplate(string activityKey)
-        {
-            var sb = new StringBuilder();
-            sb.AppendLine("-- Auto-generated by MCP for activity: " + activityKey);
-            sb.AppendLine("function ActivityRetroClaim_" + activityKey + "(player)");
-            sb.AppendLine("    -- 检查活动是否已结束且玩家有资格补领");
-            sb.AppendLine("    local canClaim = CheckActivityStatus(\"" + activityKey + "\", player)");
-            sb.AppendLine("    if not canClaim then");
-            sb.AppendLine("        return false, \"不满足补领条件\"");
-            sb.AppendLine("    end");
-            sb.AppendLine();
-            sb.AppendLine("    -- 发放奖励");
-            sb.AppendLine("    local rewards = GetActivityRewards(\"" + activityKey + "\")");
-            sb.AppendLine("    GiveRewardsToPlayer(player, rewards)");
-            sb.AppendLine();
-            sb.AppendLine("    -- 记录补领日志");
-            sb.AppendLine("    LogRetroClaim(player, \"" + activityKey + "\")");
-            sb.AppendLine();
-            sb.AppendLine("    return true, \"奖励补领成功\"");
-            sb.AppendLine("end");
-            return sb.ToString();
-        }
-        
         private async Task SendResponse(object response)
         {
             string json = JsonConvert.SerializeObject(response, Formatting.None, new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
