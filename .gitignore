@@ -1,0 +1,28 @@
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+[Bb]in/
+[Oo]bj/
+
+# Packages
+*.nupkg
+*.snupkg
+*.dll
+*.exe
+*.pdb
+*.lock.json
+project.assets.json
+
+# Rider
+.idea/
+
+# Other
+*.log
+*.tmp
